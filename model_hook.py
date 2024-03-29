@@ -1,5 +1,5 @@
-from typing import Union, List
-
+from typing import Union, List, Tuple
+from collections import defaultdict
 from torch import nn
 import torch
 from torch.nn import Conv2d, Linear, AdaptiveAvgPool2d
@@ -9,87 +9,135 @@ class ModelHook:
     def __init__(
         self,
         register_module_name: Union[List[str], str],
-        hook_and_action: Union[List[str], str],
+        hook_and_action: Union[List[List[str]], List[str], str],
     ):
-        """Register hooks for model
+        """Initialize the ModelHook class.
 
         Args:
-            register_module_name: the name of the module to be registered
-            hook_and_action: the type of hook to be registered and corresponding action,
-                the type of hook including 'forward', 'backward', the actions including 'getInput', 'getOutput',
-                use '_' to connect the type of hook and action, e.g. 'forward_getInput', 'backward_getOutput'
+            register_module_name (Union[List[str], str]): The name of the module(s) to be registered. Can be a single module name or a list of module names.
+            hook_and_action (Union[List[List[str]], List[str], str]): The type of hook to be registered and the corresponding action(s).
+                If a single module is being registered, hook_and_action should be a string indicating the type of hook and action to be registered.
+                If multiple modules are being registered, hook_and_action should be a list of strings or sublists, where each sublist contains the type of hook and action(s) for each module.
+                The type of hook includes 'forward' and 'backward', and the actions include 'getInput', 'getOutput', 'getInputGrad' and 'getOutputGrad'.
+                Use '_' to connect the type of hook and action, e.g. 'forward_getInput', 'backward_getOutput'.
         """
         if isinstance(register_module_name, list) and isinstance(hook_and_action, list):
             assert len(register_module_name) == len(hook_and_action)
         else:
-            assert isinstance(register_module_name, str) and isinstance(
-                hook_and_action, str
-            )
-            register_module_name, hook_and_action = [register_module_name], [
-                hook_and_action
-            ]
+            assert isinstance(register_module_name, str)
+            assert isinstance(hook_and_action, str)
+            register_module_name = [register_module_name]
+            hook_and_action = [hook_and_action]
         self.model_name = "Model"
-        self.register_module_name = register_module_name
-        self.hook, self.action = [], []
-        for h_a in hook_and_action:
-            h, a = h_a.split("_")
-            self.hook.append(self.hook_types(h))
-            self.action.append(self.action_types(a))
-        self.module_hooks = {
-            name: (hook, action)
-            for name, hook, action in zip(
-                self.register_module_name, self.hook, self.action
-            )
+        self.action_to_hook = {
+            "getInputGrad": "backward",
+            "getOutputGrad": "backward",
+            "getInput": "forward",
+            "getOutput": "forward",
         }
-        self.output = dict.fromkeys(self.register_module_name)
-
-    def hook_types(self, name):
-        if name == "forward":
-            return "register_forward_hook"
-        elif name == "backward":
-            return "register_backward_hook"
-
-    def action_types(self, name):
-
-        def get_input(module_name):
-            # Store input with module name
-            def _get_input(module, input, output):
-                if isinstance(input, tuple) and len(input) == 1:
-                    self.output[module_name] = input[0]
-                else:
-                    # If there are multiple input tensors, raise an error
-                    raise NotImplementedError(
-                        "Multiple input tensors are not supported yet"
-                    )
-
-            return _get_input
-
-        def get_output(module_name):
-            # Store output with module name
-            def _get_output(module, input, output):
-                self.output[module_name] = output
-
-            return _get_output
-
-        if name == "getInput":
-            return get_input
-        elif name == "getOutput":
-            return get_output
-        else:
-            raise ValueError("Invalid hook action")
+        self.output = defaultdict(lambda: defaultdict(lambda: None))
+        self.hooks = defaultdict(lambda: defaultdict(lambda: None))
+        for name, h_a in zip(register_module_name, hook_and_action):
+            for h_a_item in self._parse_hook_and_action(h_a):
+                hook, action = h_a_item.split("_")
+                assert hook == self.action_to_hook.get(action, None)
+                self.hooks[name][h_a_item] = None
+                self.output[name][h_a_item] = None
 
     def register_hooks(self, model):
         for name, module in model.named_modules():
-            if name in self.register_module_name:
-                hook, action = self.module_hooks[name]
-                getattr(module, hook)(action(name))
+            if name in self.hooks.keys():
+                for hook_action in self.hooks[name].keys():
+                    hook, action = hook_action.split("_")
+                    self.hooks[name][hook_action] = getattr(
+                        module, self.hook_types(hook)
+                    )(self.hook_closure(name, hook, action))
         self.model_name = model.__class__.__name__
 
+    def remove_hooks(self):
+        for module_name, hooks in self.hooks.items():
+            for hook_action, hook_func in hooks.items():
+                assert (
+                    hook_func is not None
+                ), f'Hook "{module_name}:{hook_action}" is not registered'
+                hook_func.remove()
+
+    def hook_closure(self, module_name, hook, action):
+        if action in ["getInput", "getOutput"]:
+            return self.get_feature_closure(module_name, hook, action)
+        elif action in ["getInputGrad", "getOutputGrad"]:
+            return self.get_grad_closure(module_name, hook, action)
+        else:
+            raise ValueError("Invalid hook action")
+
+    def get_feature_closure(self, module_name, hook, action):
+        def _get_feature(module, input, output):
+            if action == "getInput":
+                feature = input
+            elif action == "getOutput":
+                feature = output
+            else:
+                raise ValueError("Invalid action name")
+            if isinstance(feature, tuple) and len(feature) == 1:
+                self.output[module_name][f"{hook}_{action}"] = feature[0]
+            elif isinstance(feature, torch.Tensor):
+                self.output[module_name][f"{hook}_{action}"] = feature
+            else:
+                raise NotImplementedError(
+                    "Get features of multiple tensors are not supported yet"
+                )
+
+        return _get_feature
+
+    def get_grad_closure(self, module_name, hook, action):
+        def _get_grad(module, grad_input, grad_output):
+            if action == "getInputGrad":
+                grad = grad_input
+            elif action == "getOutputGrad":
+                grad = grad_output
+            else:
+                raise ValueError("Invalid action name")
+            if isinstance(grad, tuple) and len(grad) == 1:
+                self.output[module_name][f"{hook}_{action}"] = grad[0]
+            elif isinstance(grad, torch.Tensor):
+                self.output[module_name][f"{hook}_{action}"] = grad
+            else:
+                raise NotImplementedError(
+                    "Multiple output tensors are not supported yet"
+                )
+
+        return _get_grad
+
+    @staticmethod
+    def hook_types(name):
+        if name == "forward":
+            return "register_forward_hook"
+        elif name == "backward":
+            return "register_full_backward_hook"
+        else:
+            raise ValueError("Invalid hook type")
+
+    def __getitem__(self, key):  # [ ] complete this
+        return self.output[key]
+
     def __str__(self):
-        str = f"Hooks of {self.model_name}: \n"
-        for name, output in self.output.items():
-            str += f"{name}: {output.shape}\n"
-        return str
+        indent = " " * 2
+        str_ = f"Hooks of {self.model_name}: \n"
+        for module, hook_actions in self.output.items():
+            str_ += f"{indent}{module}:\n"
+            for h_a, output in hook_actions.items():
+                str_ += (
+                    f"{indent*2}{h_a}: {output.shape if output is not None else None}\n"
+                )
+        return str_
+
+    def _parse_hook_and_action(self, h_a):
+        if isinstance(h_a, list):
+            return h_a
+        elif isinstance(h_a, str):
+            return [h_a]
+        else:
+            raise ValueError("Invalid hook action")
 
 
 # test Model
@@ -125,15 +173,46 @@ if __name__ == "__main__":
         ["conv1", "layer1"], ["forward_getOutput", "forward_getInput"]
     )
     model_hook_multi.register_hooks(model)
+    model_hook_multiAction = ModelHook(
+        ["conv1", "layer1"],
+        [
+            [
+                "forward_getInput",
+                "forward_getOutput",
+                "backward_getInputGrad",
+                "backward_getOutputGrad",
+            ],
+            [
+                "forward_getInput",
+                "forward_getOutput",
+                "backward_getInputGrad",
+                "backward_getOutputGrad",
+            ],
+        ],
+    )
+    model_hook_multiAction.register_hooks(model)
 
     x = torch.randn([32, 3, 224, 224])
     model_out = model(x)
+    loss = model_out["layer1_out"].sum()
+    loss.backward()
 
-    assert torch.equal(model_hook.output["layer1"], model_out["layer1_out"])
-    assert torch.equal(model_hook_multi.output["conv1"], model_out["conv1_out"])
-    assert torch.equal(model_hook_multi.output["layer1"], model_out["flat"])
-
+    assert torch.equal(
+        model_hook["layer1"]["forward_getOutput"], model_out["layer1_out"]
+    )
     print(f"capture intermediate layer:\n{model_hook}")
+    
+    assert torch.equal(
+        model_hook_multi["conv1"]["forward_getOutput"], model_out["conv1_out"]
+    )
+    assert torch.equal(
+        model_hook_multi["layer1"]["forward_getInput"], model_out["flat"]
+    )
     print(f"capture multi intermediate layer:\n{model_hook_multi}")
+    
+
+    model_hook.remove_hooks()
+    model_hook_multi.remove_hooks()
+    model_hook_multiAction.remove_hooks()
 
     print("end of test")
