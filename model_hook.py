@@ -16,10 +16,10 @@ class ModelHook:
         Args:
             register_module_name (Union[List[str], str]): The name of the module(s) to be registered. Can be a single module name or a list of module names.
             hook_and_action (Union[List[List[str]], List[str], str]): The type of hook to be registered and the corresponding action(s).
-                If a single module is being registered, hook_and_action should be a string indicating the type of hook and action to be registered.
+                If a single module is registered, hook_and_action should be a string indicating the type of hook and action to be registered.
                 If multiple modules are being registered, hook_and_action should be a list of strings or sublists, where each sublist contains the type of hook and action(s) for each module.
-                The type of hook includes 'forward' and 'backward', and the actions include 'getInput', 'getOutput', 'getInputGrad' and 'getOutputGrad'.
-                Use '_' to connect the type of hook and action, e.g. 'forward_getInput', 'backward_getOutput'.
+                The hook types include 'forward' and 'backward', and the actions include 'getInput', 'getOutput', 'getInputGrad' and 'getOutputGrad'.
+                Use '_' to connect the hook types and actions, e.g. 'forward_getInput', 'backward_getOutput'.
         """
         if isinstance(register_module_name, list) and isinstance(hook_and_action, list):
             assert len(register_module_name) == len(hook_and_action)
@@ -117,7 +117,7 @@ class ModelHook:
         else:
             raise ValueError("Invalid hook type")
 
-    def __getitem__(self, key):  # [ ] complete this
+    def __getitem__(self, key):
         return self.output[key]
 
     def __str__(self):
