@@ -80,12 +80,8 @@ class ModelHook:
                 raise ValueError("Invalid action name")
             if isinstance(feature, tuple) and len(feature) == 1:
                 self.output[module_name][f"{hook}_{action}"] = feature[0]
-            elif isinstance(feature, torch.Tensor):
-                self.output[module_name][f"{hook}_{action}"] = feature
             else:
-                raise NotImplementedError(
-                    "Get features of multiple tensors are not supported yet"
-                )
+                self.output[module_name][f"{hook}_{action}"] = feature
 
         return _get_feature
 
@@ -99,12 +95,8 @@ class ModelHook:
                 raise ValueError("Invalid action name")
             if isinstance(grad, tuple) and len(grad) == 1:
                 self.output[module_name][f"{hook}_{action}"] = grad[0]
-            elif isinstance(grad, torch.Tensor):
-                self.output[module_name][f"{hook}_{action}"] = grad
             else:
-                raise NotImplementedError(
-                    "Multiple output tensors are not supported yet"
-                )
+                self.output[module_name][f"{hook}_{action}"] = grad
 
         return _get_grad
 
@@ -126,9 +118,12 @@ class ModelHook:
         for module, hook_actions in self.output.items():
             str_ += f"{indent}{module}:\n"
             for h_a, output in hook_actions.items():
-                str_ += (
-                    f"{indent*2}{h_a}: {output.shape if output is not None else None}\n"
-                )
+                if not isinstance(output, tuple):
+                    show_output = None if output is None else output.shape
+                    str_ += f"{indent*2}{h_a}: {show_output}\n"
+                elif len(output) > 1:
+                    for i, o in enumerate(output):
+                        str_ += f"{indent*2}{h_a}_{i}: {o.shape if o is not None else None}\n"
         return str_
 
     def _parse_hook_and_action(self, h_a):
